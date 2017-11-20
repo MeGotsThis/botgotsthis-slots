@@ -1,3 +1,4 @@
+import asyncio
 import random
 import statistics
 from datetime import datetime, timedelta
@@ -5,8 +6,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple  # noqa: F401
 
 import aioodbc.cursor  # noqa: F401
 
-import bot
 from bot import data, utils  # noqa: F401
+from lib.cache import CacheStore
 from lib.database import DatabaseMain
 
 
@@ -158,8 +159,14 @@ async def process_bot(
     return True if toMark else None
 
 
-def generate_twitch_pool() -> Optional[Dict[int, str]]:
-    emotes: Dict[int, str] = bot.globals.globalEmotes.copy()
+async def generate_twitch_pool(dataCache: CacheStore
+                               ) -> Optional[Dict[int, str]]:
+    emoteSets: Optional[Set[int]] = await dataCache.twitch_get_bot_emote_set()
+    if emoteSets is None:
+        return None
+    if not await dataCache.twitch_load_emotes(emoteSets):
+        return None
+    emotes: Dict[int, str] = await dataCache.twitch_get_emotes()
     if len(emotes) < 8:
         return None
     if len(emotes) > 16:
@@ -212,12 +219,20 @@ SELECT attemptTime
 
 async def recordTwitchSlots(
         database: DatabaseMain,
+        dataCache: CacheStore,
         channel: str,
         nick: str,
         emotes: Dict[int, str],
         selectedIds: List[int]) -> None:
+    emoteSets: Dict[int, int]
+    maybeSets: Optional[Dict[int, int]]
+    maybeSets = await dataCache.twitch_get_emote_sets()
+    if maybeSets is not None:
+        emoteSets = maybeSets
+    else:
+        emoteSets = {i: i for i in selectedIds}
     matchEmoteId: int = selectedIds[0]
-    matchEmoteSetId: int = bot.globals.globalEmoteSets[matchEmoteId]
+    matchEmoteSetId: int = emoteSets[matchEmoteId]
     numMatching: int = 0
     numBasic: int = 0
     numKappa: int = 0
@@ -238,7 +253,7 @@ async def recordTwitchSlots(
             numCat += 1
         if emotes[emoteId] in dogEmotes:
             numDog += 1
-        if bot.globals.globalEmoteSets[emoteId] == matchEmoteSetId:
+        if emoteSets[emoteId] == matchEmoteSetId:
             numSub += 1
     allMatching: bool = numMatching == 3
     allBasic: bool = numBasic == 3
@@ -277,9 +292,26 @@ INSERT INTO slot_winners
         await database.commit()
 
 
-def generate_ffz_pool(chat: 'data.Channel') -> Dict[int, str]:
-    globalEmotes: Dict[int, str] = bot.globals.globalFfzEmotes
-    chanEmotes: Dict[int, str] = chat.ffzEmotes
+async def generate_ffz_pool(chat: 'data.Channel',
+                            dataCache: CacheStore
+                            ) -> Optional[Dict[int, str]]:
+    async def getGlobal() -> Optional[Dict[int, str]]:
+        if not await dataCache.ffz_load_global_emotes():
+            return None
+        return await dataCache.ffz_get_global_emotes()
+
+    async def getBroadcaster() -> Optional[Dict[int, str]]:
+        if not await dataCache.ffz_load_broadcaster_emotes(chat.channel):
+            return None
+        return await dataCache.ffz_get_broadcaster_emotes(chat.channel)
+
+    globalEmotes: Optional[Dict[int, str]]
+    chanEmotes: Optional[Dict[int, str]]
+    globalEmotes, chanEmotes = await asyncio.gather(
+        getGlobal(), getBroadcaster()
+    )
+    if globalEmotes is None or chanEmotes is None:
+        return None
     emotes: Dict[int, str]
     emotes = dict(list(globalEmotes.items()) + list(chanEmotes.items()))
     if len(emotes) > 16:
@@ -366,9 +398,26 @@ INSERT INTO ffz_slot_winners
         await database.commit()
 
 
-def generate_bttv_pool(chat: 'data.Channel') -> Dict[str, str]:
-    globalEmotes: Dict[str, str] = bot.globals.globalBttvEmotes
-    chanEmotes: Dict[str, str] = chat.bttvEmotes
+async def generate_bttv_pool(chat: 'data.Channel',
+                             dataCache: CacheStore
+                             ) -> Optional[Dict[str, str]]:
+    async def getGlobal() -> Optional[Dict[str, str]]:
+        if not await dataCache.bttv_load_global_emotes():
+            return None
+        return await dataCache.bttv_get_global_emotes()
+
+    async def getBroadcaster() -> Optional[Dict[str, str]]:
+        if not await dataCache.bttv_load_broadcaster_emotes(chat.channel):
+            return None
+        return await dataCache.bttv_get_broadcaster_emotes(chat.channel)
+
+    globalEmotes: Optional[Dict[str, str]]
+    chanEmotes: Optional[Dict[str, str]]
+    globalEmotes, chanEmotes = await asyncio.gather(
+        getGlobal(), getBroadcaster()
+    )
+    if globalEmotes is None or chanEmotes is None:
+        return None
     emotes: Dict[str, str]
     emotes = dict(list(globalEmotes.items()) + list(chanEmotes.items()))
     if len(emotes) > 16:
